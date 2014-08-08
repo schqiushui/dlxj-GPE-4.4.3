@@ -16,11 +16,10 @@
 
 #ifndef _LINUX_SYNAPTICS_I2C_RMI_H
 #define _LINUX_SYNAPTICS_I2C_RMI_H
-
 #ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
 #include <linux/input.h>
+#include <linux/leds-pm8921.h>
 #endif
-
 #define SYNAPTICS_I2C_RMI_NAME "synaptics-rmi-ts"
 #define SYNAPTICS_T1007_NAME "synaptics-t1007"
 #define SYNAPTICS_T1021_NAME "synaptics-t1021"

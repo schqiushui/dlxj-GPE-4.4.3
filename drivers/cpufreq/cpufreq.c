@@ -33,6 +33,9 @@
 #include <trace/events/power.h>
 
 static struct cpufreq_driver *cpufreq_driver;
+
+static int sys_locked = 0;
+
 static DEFINE_PER_CPU(struct cpufreq_policy *, cpufreq_cpu_data);
 #ifdef CONFIG_HOTPLUG_CPU
 struct cpufreq_cpu_save_data {
@@ -329,9 +332,22 @@ static ssize_t show_##file_name				\
 {							\
 	return sprintf(buf, "%u\n", policy->object);	\
 }
-
+#ifdef CONFIG_CMDLINE_OPTIONS
+#define show_one_cpuinfomaxfreq(file_name, object)		\
+static ssize_t show_##file_name					\
+(struct cpufreq_policy *policy, char *buf)			\
+{								\
+	if (cmdline_maxkhz) { 				    	\
+		return sprintf(buf, "%u\n", cmdline_maxkhz);	\
+	} else {						\
+		return sprintf(buf, "%u\n", policy->object);	\
+	}							\
+}
+show_one_cpuinfomaxfreq(cpuinfo_max_freq, cpuinfo.max_freq);
+#else
+show_one(cpuinfo_max_freq, max);
+#endif
 show_one(cpuinfo_min_freq, cpuinfo.min_freq);
-show_one(cpuinfo_max_freq, cpuinfo.max_freq);
 show_one(cpuinfo_transition_latency, cpuinfo.transition_latency);
 show_one(scaling_min_freq, min);
 show_one(scaling_max_freq, max);
@@ -355,6 +371,9 @@ static ssize_t store_##file_name					\
 	unsigned int ret = -EINVAL;					\
 	unsigned int freq = 0;						\
 	struct cpufreq_policy new_policy;				\
+									\
+	if (sys_locked)							\
+		return -EINVAL;						\
 									\
 	ret = cpufreq_get_policy(&new_policy, policy->cpu);		\
 	if (ret)							\
@@ -407,6 +426,9 @@ static ssize_t store_scaling_governor(struct cpufreq_policy *policy,
 	unsigned int ret = -EINVAL;
 	char	str_governor[16];
 	struct cpufreq_policy new_policy;
+
+	//if (sys_locked)
+	//	return -EINVAL;
 
 	ret = cpufreq_get_policy(&new_policy, policy->cpu);
 	if (ret)
@@ -635,6 +657,58 @@ static struct attribute_group vddtbl_attr_group = {
 };
 #endif	/* CONFIG_CPU_VOLTAGE_TABLE */
 
+#ifdef CONFIG_CMDLINE_OPTIONS 
+/* Read cmdline for sys_locked */
+static int __init read_sys_locked_cmdline(char *locked)
+{
+	if (strcmp(locked, "1") == 0) {
+		pr_info("[cmdline_sys_locked]: Enabled. | locked='%u'\n", sys_locked);
+                sys_locked = 1;
+	} else if (strcmp(locked, "0") == 0) {
+		pr_info("[cmdline_sys_locked]: Disabled. | locked='%u'\n", sys_locked);
+		sys_locked = 0;
+	} else {
+		pr_info("[cmdline_sys_locked]: No valid input found. Going with default: | locked='%u'\n", sys_locked);
+	}
+	return 1;
+}
+
+__setup("locked=", read_sys_locked_cmdline);
+#endif /* CONFIG_CMDLINE_OPTIONS */
+
+static ssize_t show_locked(struct kobject *a, struct attribute *b, char *buf)
+{
+	return sprintf(buf, "%d\n", sys_locked);
+}
+
+static ssize_t store_locked(struct kobject *a, struct attribute *b, const char *buf, size_t count)
+{
+	int ret;
+	int new_int;
+
+	pr_info("store_locked: %p %p %p %u\n", a, b, buf, (unsigned) count);
+
+	ret = sscanf(buf, "%d", &new_int);
+	if (ret != 1)
+		return -EINVAL;
+
+	sys_locked = (new_int != 0);
+
+	return count;
+}
+
+define_one_global_rw(locked);
+
+static struct attribute *locked_attrs[] = {
+	&locked.attr,
+	NULL
+};
+
+static struct attribute_group locked_attr_group = {
+	.attrs = locked_attrs,
+	.name = "locked",
+};
+
 struct kobject *cpufreq_global_kobject;
 EXPORT_SYMBOL(cpufreq_global_kobject);
 
@@ -780,6 +854,8 @@ static int cpufreq_add_dev_policy(unsigned int cpu,
 
 			spin_lock_irqsave(&cpufreq_driver_lock, flags);
 			cpumask_copy(managed_policy->cpus, policy->cpus);
+			cpumask_and(managed_policy->cpus,
+					managed_policy->cpus, cpu_online_mask);
 			per_cpu(cpufreq_cpu_data, cpu) = managed_policy;
 			spin_unlock_irqrestore(&cpufreq_driver_lock, flags);
 
@@ -887,7 +963,6 @@ static int cpufreq_add_dev_interface(unsigned int cpu,
 	memcpy(&new_policy, policy, sizeof(struct cpufreq_policy));
 	
 	policy->governor = NULL;
-
 	
 	ret = __cpufreq_set_policy(policy, &new_policy);
 	policy->user_policy.policy = policy->policy;
@@ -962,10 +1037,14 @@ static int cpufreq_add_dev(struct device *dev, struct subsys_interface *sif)
 #ifdef CONFIG_HOTPLUG_CPU
 	for_each_online_cpu(sibling) {
 		struct cpufreq_policy *cp = per_cpu(cpufreq_cpu_data, sibling);
-		if (cp && cp->governor &&
-		    (cpumask_test_cpu(cpu, cp->related_cpus))) {
-			policy->governor = cp->governor;
-			found = 1;
+		if (cp && cp->governor) {
+  			policy->governor = cp->governor;
+			policy->min = cp->min;
+			policy->max = cp->max;
+			policy->user_policy.min = cp->user_policy.min;
+			policy->user_policy.max = cp->user_policy.max;
+  			found = 1;
+			//pr_info("sibling: found sibling!\n");
 			break;
 		}
 	}
@@ -1070,10 +1149,10 @@ static int __cpufreq_remove_dev(struct device *dev, struct subsys_interface *sif
 #ifdef CONFIG_HOTPLUG_CPU
 	strncpy(per_cpu(cpufreq_policy_save, cpu).gov, data->governor->name,
 			CPUFREQ_NAME_LEN);
-	per_cpu(cpufreq_policy_save, cpu).min = data->min;
-	per_cpu(cpufreq_policy_save, cpu).max = data->max;
-	pr_debug("Saving CPU%d policy min %d and max %d\n",
-			cpu, data->min, data->max);
+	per_cpu(cpufreq_policy_save, cpu).min = data->user_policy.min;
+	per_cpu(cpufreq_policy_save, cpu).max = data->user_policy.max;
+	pr_debug("Saving CPU%d user policy min %d and max %d\n",
+			cpu, data->user_policy.min, data->user_policy.max);
 #endif
 
 	if (unlikely(cpumask_weight(data->cpus) > 1)) {
@@ -1094,9 +1173,11 @@ static int __cpufreq_remove_dev(struct device *dev, struct subsys_interface *sif
 #ifdef CONFIG_HOTPLUG_CPU
 			strncpy(per_cpu(cpufreq_policy_save, j).gov,
 				data->governor->name, CPUFREQ_NAME_LEN);
-			per_cpu(cpufreq_policy_save, j).min = data->min;
-			per_cpu(cpufreq_policy_save, j).max = data->max;
-			pr_debug("Saving CPU%d policy min %d and max %d\n",
+			per_cpu(cpufreq_policy_save, j).min
+						= data->user_policy.min;
+			per_cpu(cpufreq_policy_save, j).max
+						= data->user_policy.max;
+			pr_debug("Saving CPU%d user policy min %d and max %d\n",
 					j, data->min, data->max);
 #endif
 			cpu_dev = get_cpu_device(j);
@@ -1649,6 +1730,13 @@ error_out:
 	return ret;
 }
 
+/**
+ *	cpufreq_update_policy - re-evaluate an existing cpufreq policy
+ *	@cpu: CPU which shall be re-evaluated
+ *
+ *	Useful for policy notifiers which have different necessities
+ *	at different times.
+ */
 int cpufreq_update_policy(unsigned int cpu)
 {
 	struct cpufreq_policy *data = cpufreq_cpu_get(cpu);
@@ -1830,6 +1918,7 @@ static int __init cpufreq_core_init(void)
 	cpufreq_global_kobject = kobject_create_and_add("cpufreq", &cpu_subsys.dev_root->kobj);
 	BUG_ON(!cpufreq_global_kobject);
 	register_syscore_ops(&cpufreq_syscore_ops);
+	rc = sysfs_create_group(cpufreq_global_kobject, &locked_attr_group);
 #ifdef CONFIG_CPU_VOLTAGE_TABLE
 	rc = sysfs_create_group(cpufreq_global_kobject, &vddtbl_attr_group);
 #endif	/* CONFIG_CPU_VOLTAGE_TABLE */

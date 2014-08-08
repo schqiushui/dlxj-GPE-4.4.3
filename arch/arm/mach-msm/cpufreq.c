@@ -35,11 +35,7 @@
 #ifdef CONFIG_PERFLOCK
 #include <mach/perflock.h>
 #endif
-
-/* maxscroff */
-uint32_t maxscroff_freq = 1134000;
-uint32_t maxscroff = 0;
-
+ 
 #ifdef CONFIG_SMP
 struct cpufreq_work_struct {
 	struct work_struct work;
@@ -71,6 +67,85 @@ struct cpu_freq {
 static DEFINE_PER_CPU(struct cpu_freq, cpu_freq_info);
 
 static int override_cpu;
+#ifdef CONFIG_CMDLINE_OPTIONS
+/*
+ * start cmdline_khz
+ */
+
+/* to be safe, fill vars with defaults */
+
+
+uint32_t cmdline_maxkhz = 1512000, cmdline_minkhz = 162000;
+
+static int __init cpufreq_read_maxkhz_cmdline(char *maxkhz)
+{
+	uint32_t check;
+	unsigned long ui_khz;
+	int err;
+
+	err = strict_strtoul(maxkhz, 0, &ui_khz);
+	if (err) {
+		cmdline_maxkhz = 1512000;
+		printk(KERN_INFO "[cmdline_khz_max]: ERROR while converting! using default value!");
+		printk(KERN_INFO "[cmdline_khz_max]: maxkhz='%i'\n", cmdline_maxkhz);
+		return 1;
+	}
+
+	check = acpu_check_khz_value(ui_khz);
+
+	if (check == 1) {
+		cmdline_maxkhz = ui_khz;
+		printk(KERN_INFO "[cmdline_khz_max]: maxkhz='%u'\n", cmdline_maxkhz);
+	}
+	if (check == 0) {
+		cmdline_maxkhz = 1512000;
+		printk(KERN_INFO "[cmdline_khz_max]: ERROR! using default value!");
+		printk(KERN_INFO "[cmdline_khz_max]: maxkhz='%u'\n", cmdline_maxkhz);
+	}
+	if (check > 1) {
+		cmdline_maxkhz = check;
+		printk(KERN_INFO "[cmdline_khz_max]: AUTOCORRECT! Could not find entered value in the acpu table!");
+		printk(KERN_INFO "[cmdline_khz_max]: maxkhz='%u'\n", cmdline_maxkhz);
+	}
+        return 1;
+}
+__setup("maxkhz=", cpufreq_read_maxkhz_cmdline);
+
+static int __init cpufreq_read_minkhz_cmdline(char *minkhz)
+{
+	uint32_t check;
+	unsigned long ui_khz;
+	int err;
+
+	err = strict_strtoul(minkhz, 0, &ui_khz);
+	if (err) {
+		cmdline_minkhz = 162000;
+		printk(KERN_INFO "[cmdline_khz_min]: ERROR while converting! using default value!");
+		printk(KERN_INFO "[cmdline_khz_min]: minkhz='%i'\n", cmdline_minkhz);
+		return 1;
+	}
+
+	check = acpu_check_khz_value(ui_khz);
+
+	if (check == 1) {
+		cmdline_minkhz = ui_khz;
+		printk(KERN_INFO "[cmdline_khz_min]: minkhz='%u'\n", cmdline_minkhz);
+	}
+	if (check == 0) {
+		cmdline_minkhz = 162000;
+		printk(KERN_INFO "[cmdline_khz_min]: ERROR! using default value!");
+		printk(KERN_INFO "[cmdline_khz_min]: minkhz='%u'\n", cmdline_minkhz);
+	}
+	if (check > 1) {
+		cmdline_minkhz = check;
+		printk(KERN_INFO "[cmdline_khz_min]: AUTOCORRECT! Could not find entered value in the acpu table!");
+		printk(KERN_INFO "[cmdline_khz_min]: minkhz='%u'\n", cmdline_minkhz);
+	}
+        return 1;
+}
+__setup("minkhz=", cpufreq_read_minkhz_cmdline);
+/* end cmdline_khz */
+#endif
 
 static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq)
 {
@@ -283,11 +358,11 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 {
 	int cur_freq;
 	int index;
+	int ret = 0;
 	struct cpufreq_frequency_table *table;
 #ifdef CONFIG_SMP
 	struct cpufreq_work_struct *cpu_work = NULL;
 #endif
-
 
 	table = cpufreq_frequency_get_table(policy->cpu);
 	if (table == NULL)
@@ -297,13 +372,23 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 
 	if (cpufreq_frequency_table_cpuinfo(policy, table)) {
 #ifdef CONFIG_MSM_CPU_FREQ_SET_MIN_MAX
-		policy->cpuinfo.min_freq = CONFIG_MSM_CPU_FREQ_MIN;
-		policy->cpuinfo.max_freq = CONFIG_MSM_CPU_FREQ_MAX;
+  		policy->cpuinfo.min_freq = CONFIG_MSM_CPU_FREQ_MIN;
+  		policy->cpuinfo.max_freq = CONFIG_MSM_CPU_FREQ_MAX;
+#endif
+#ifdef CONFIG_CMDLINE_OPTIONS
+		policy->cpuinfo.min_freq = cmdline_minkhz;
+		policy->cpuinfo.max_freq = cmdline_maxkhz;
 #endif
 	}
+
 #ifdef CONFIG_MSM_CPU_FREQ_SET_MIN_MAX
-	policy->min = CONFIG_MSM_CPU_FREQ_MIN;
-	policy->max = CONFIG_MSM_CPU_FREQ_MAX;
+		policy->min = CONFIG_MSM_CPU_FREQ_MIN;
+		policy->max = CONFIG_MSM_CPU_FREQ_MAX;
+#endif
+
+#ifdef CONFIG_CMDLINE_OPTIONS
+		policy->max = cmdline_maxkhz;
+		policy->min = cmdline_minkhz;
 #endif
 
 #ifdef CONFIG_ARCH_APQ8064
@@ -323,18 +408,12 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 		return -EINVAL;
 	}
 
-	if (cur_freq != table[index].frequency) {
-		int ret = 0;
-		ret = acpuclk_set_rate(policy->cpu, table[index].frequency,
-				SETRATE_CPUFREQ);
-		if (ret)
-			return ret;
-		pr_info("cpufreq: cpu%d init at %d switching to %d\n",
-				policy->cpu, cur_freq, table[index].frequency);
-		cur_freq = table[index].frequency;
-	}
-
-	policy->cur = cur_freq;
+	ret = set_cpu_freq(policy, table[index].frequency);
+	if (ret)
+	  return ret;
+	pr_debug("cpufreq: cpu%d init at %d switching to %d\n",
+	    policy->cpu, cur_freq, table[index].frequency);
+	policy->cur = table[index].frequency;
 
 	policy->cpuinfo.transition_latency =
 		acpuclk_get_switch_time() * NSEC_PER_USEC;
@@ -343,7 +422,6 @@ static int __cpuinit msm_cpufreq_init(struct cpufreq_policy *policy)
 	INIT_WORK(&cpu_work->work, set_cpu_work);
 	init_completion(&cpu_work->complete);
 #endif
-
 	return 0;
 }
 
@@ -386,83 +464,8 @@ static int msm_cpufreq_pm_event(struct notifier_block *this,
 	}
 }
 
-/** maxscreen off sysfs interface **/
-
-static ssize_t show_max_screen_off_khz(struct cpufreq_policy *policy, char *buf)
-{
-	return sprintf(buf, "%u\n", maxscroff_freq);
-}
-
-static ssize_t store_max_screen_off_khz(struct cpufreq_policy *policy,
-		const char *buf, size_t count)
-{
-	unsigned int freq = 0;
-	int ret;
-	int index;
-	struct cpufreq_frequency_table *freq_table = cpufreq_frequency_get_table(policy->cpu);
-
-	if (!freq_table)
-		return -EINVAL;
-
-	ret = sscanf(buf, "%u", &freq);
-	if (ret != 1)
-		return -EINVAL;
-
-	mutex_lock(&per_cpu(cpufreq_suspend, policy->cpu).suspend_mutex);
-
-	ret = cpufreq_frequency_table_target(policy, freq_table, freq,
-			CPUFREQ_RELATION_H, &index);
-	if (ret)
-		goto out;
-
-	maxscroff_freq = freq_table[index].frequency;
-
-	ret = count;
-
-out:
-	mutex_unlock(&per_cpu(cpufreq_suspend, policy->cpu).suspend_mutex);
-	return ret;
-}
-
-struct freq_attr msm_cpufreq_attr_max_screen_off_khz = {
-	.attr = { .name = "screen_off_max_freq",
-		.mode = 0644,
-	},
-	.show = show_max_screen_off_khz,
-	.store = store_max_screen_off_khz,
-};
-
-static ssize_t show_max_screen_off(struct cpufreq_policy *policy, char *buf)
-{
-	return sprintf(buf, "%u\n", maxscroff);
-}
-
-static ssize_t store_max_screen_off(struct cpufreq_policy *policy,
-		const char *buf, size_t count)
-{
-	if (buf[0] >= '0' && buf[0] <= '1' && buf[1] == '\n')
-            if (maxscroff != buf[0] - '0') 
-		        maxscroff = buf[0] - '0';
-
-	return count;
-}
-
-struct freq_attr msm_cpufreq_attr_max_screen_off = {
-	.attr = { .name = "screen_off_max",
-		.mode = 0644,
-	},
-	.show = show_max_screen_off,
-	.store = store_max_screen_off,
-};
-
-/** end maxscreen off sysfs interface **/
-
-
 static struct freq_attr *msm_freq_attr[] = {
 	&cpufreq_freq_attr_scaling_available_freqs,
-/** maxscreen off sysfs interface **/
-	&msm_cpufreq_attr_max_screen_off_khz,
-	&msm_cpufreq_attr_max_screen_off,
 	NULL,
 };
 
